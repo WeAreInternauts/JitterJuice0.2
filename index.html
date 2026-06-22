@@ -239,6 +239,16 @@
       background: linear-gradient(90deg, transparent, rgba(255,255,255,0.14) 50%, transparent);
       border-radius: 50%;
     }
+    /* Done-state glow — lights up the entire frame border */
+    .card.done-glow {
+      border-color: rgba(57,224,122,0.55);
+      box-shadow:
+        var(--shadow-card),
+        0 0 0 1px rgba(57,224,122,0.3),
+        0 0 40px 8px rgba(57,224,122,0.18),
+        0 0 80px 20px rgba(57,224,122,0.10);
+      transition: border-color 0.8s ease, box-shadow 0.8s ease;
+    }
     /* Card inner glow from accent */
     .card::after {
       content: '';
@@ -329,7 +339,7 @@
       color: var(--text);
       line-height: 1;
       font-variant-numeric: tabular-nums;
-      transition: color 0.2s ease;
+      transition: color 0.2s ease, opacity 0.7s ease;
     }
     .speed-unit {
       font-family: var(--font-display);
@@ -339,6 +349,7 @@
       text-transform: uppercase;
       color: var(--accent);
       opacity: 0.8;
+      transition: opacity 0.7s ease;
     }
     /* Gauge scale labels */
     .gauge-label {
@@ -1006,7 +1017,11 @@
       btnStart.innerHTML='<span class="spinner" aria-hidden="true"></span>RUNNING…';
       btnRetry.classList.remove('visible');
       resetMetrics(); setGauge(0); setGaugePulsing(true);
-      speedVal.textContent='--'; locInfo.classList.remove('visible');
+      speedVal.textContent='--';
+      speedVal.style.opacity = '1';
+      speedUnit.style.opacity = '1';
+      document.querySelector('.card').classList.remove('done-glow');
+      locInfo.classList.remove('visible');
 
       try {
         // Phase 1
@@ -1048,7 +1063,7 @@
         window._fxSetMode && window._fxSetMode('upload');
         setStatus('<span class="spinner" aria-hidden="true"></span>Testing upload…','highlight');
         cardUl.classList.add('active'); ulVal.classList.add('live');
-        const ul = await measureUpload(12000);
+        const ul = await measureUpload(15000);
         if (ul!==null) {
           await animateTo(ulVal,ul,550,fmtMbps,v=>{
             ulBar.style.width=`${Math.min(v/MAX*100,100)}%`;
@@ -1059,13 +1074,14 @@
         ulBar.style.width=ul!==null?`${Math.min(ul/MAX*100,100)}%`:'0%';
         setMetricDone(cardUl,ulVal);
 
-        // Done — show best of dl/ul on gauge
+        // Done — gauge resets to 0, hide big number, light up frame
         window._fxSetMode && window._fxSetMode('idle');
         await sleep(1200);
         setGaugePulsing(false);
-        const best = dl !== null ? dl : (ul !== null ? ul : null);
-        if (best !== null) { setGauge(best); speedVal.textContent=fmtMbps(best); }
-        else               { setGauge(0);    speedVal.textContent='--'; }
+        setGauge(0);
+        speedVal.style.opacity = '0';
+        speedUnit.style.opacity = '0';
+        document.querySelector('.card').classList.add('done-glow');
         setStatus('Test complete ✓','highlight');
 
       } catch(err) {
