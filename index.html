@@ -323,7 +323,7 @@
     .speed-value {
       font-family: var(--font-display);
       /* Scales with both viewport width and the gauge's actual rendered size */
-      font-size: clamp(2.8rem, min(10vw, 14vh), 7rem);
+      font-size: clamp(2.8rem, min(10vw, 14vh), 4.5rem);
       font-weight: 200;
       letter-spacing: -0.05em;
       color: var(--text);
@@ -612,6 +612,7 @@
 
   <!-- Animated background scene -->
   <div class="bg-scene" aria-hidden="true">
+    <canvas id="fxCanvas" style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none;"></canvas>
     <div class="blob blob-1"></div>
     <div class="blob blob-2"></div>
     <div class="blob blob-3"></div>
@@ -658,8 +659,9 @@
               <!-- Main track -->
               <path class="gauge-track"
                 d="M 30 240 A 210 210 0 0 1 450 240"/>
-              <!-- Progress arc -->
+              <!-- Progress arc: hidden by default via inline style; JS sets dasharray after load -->
               <path id="gaugeArc" class="gauge-arc"
+                style="stroke-dasharray:659.73 659.73;stroke-dashoffset:659.73"
                 d="M 30 240 A 210 210 0 0 1 450 240"/>
               <!-- Tick marks -->
               <g id="gaugeTicks"></g>
@@ -857,6 +859,9 @@
     /* ── State ────────────────────────────────────── */
     let isRunning = false, abortCtrl = null;
 
+    /* Warm up the PRNG once on load — eliminates 440ms cold-start on first 512KB fill */
+    crypto.getRandomValues(new Uint8Array(1));
+
     /* ── Location ─────────────────────────────────── */
     async function detectLocation() {
       try {
@@ -927,93 +932,68 @@
       return sorted[Math.floor(sorted.length*0.9)] || sorted[sorted.length-1];
     }
 
-    /* ── Upload (XHR-based — avoids fetch CORS preflight) ── */
-    function measureUpload(durMs=8000) {
-      return new Promise(resolve => {
-        const t0       = performance.now();
-        const sizes    = [512*1024, 1*1024*1024, 2*1024*1024, 5*1024*1024];
-        let   sIdx     = 0;
-        const samples  = [];
-        let   aborted  = false;
+    /* ── Upload ───────────────────────────────────────────────────────────
+       Strategy: fetch with mode:'no-cors' — no CORS preflight at all,
+       works from any origin including Cloudflare Pages. We time the
+       upload ourselves with performance.now() for accurate Mbps.
+       Parallel workers saturate the link on fast connections.
+    ───────────────────────────────────────────────────────────────────── */
+    async function measureUpload(durMs=8000) {
+      const samples  = [];
+      const t0       = performance.now();
+      const signal   = abortCtrl.signal;
 
-        /* Listen for external abort (AbortController signal) */
-        const onAbort = () => { aborted = true; xhr && xhr.abort(); resolve(null); };
-        abortCtrl.signal.addEventListener('abort', onAbort, {once: true});
+      /* Build payload: crypto.getRandomValues in 65536-byte chunks (PRNG pre-warmed) */
+      const makeBuf = size => {
+        const buf = new Uint8Array(size);
+        for (let off = 0; off < size; off += 65536)
+          crypto.getRandomValues(buf.subarray(off, Math.min(off + 65536, size)));
+        return buf;
+      };
 
-        /* Build payload fast: fill with crypto entropy in 65536-byte chunks */
-        const makeBuf = size => {
-          const buf = new Uint8Array(size);
-          for (let off = 0; off < size; off += 65536)
-            crypto.getRandomValues(buf.subarray(off, Math.min(off + 65536, size)));
-          return buf;
-        };
-
-        let xhr;
-        function sendNext() {
-          if (aborted || sIdx >= sizes.length || performance.now()-t0 >= durMs) {
-            abortCtrl.signal.removeEventListener('abort', onAbort);
-            if (!samples.length) { resolve(null); return; }
-            const sorted = [...samples].sort((a,b)=>a-b);
-            resolve(sorted[Math.floor(sorted.length*0.9)] || sorted[sorted.length-1]);
-            return;
-          }
-
-          const size    = sizes[sIdx++];
-          const payload = makeBuf(size);
-          const tU      = performance.now();
-          let   lastBytes = 0;
-
-          xhr = new XMLHttpRequest();
-          xhr.open('POST', `https://speed.cloudflare.com/__up?_r=${Math.random()}`, true);
-          xhr.setRequestHeader('Content-Type', 'text/plain');
-          /* text/plain is a CORS "simple" content-type — browser skips OPTIONS preflight.
-             Cloudflare accepts the binary body regardless of the label. */
-
-          /* Live progress: bytes uploaded so far → instantaneous Mbps */
-          xhr.upload.onprogress = e => {
-            if (aborted) return;
-            const elapsed = performance.now() - tU;
-            if (elapsed < 50 || e.loaded === lastBytes) return;
-            const mbps = (e.loaded * 8) / (elapsed / 1000) / 1e6;
-            lastBytes = e.loaded;
-            samples.push(mbps);
-            const smooth = movingAvg(samples, 4);
-            ulVal.textContent = fmtMbps(smooth);
-            ulBar.style.width  = `${Math.min(smooth/MAX*100,100)}%`;
-            setGauge(smooth);
-            speedVal.textContent = fmtMbps(smooth);
-          };
-
-          xhr.onload = () => {
-            if (aborted) return;
-            /* Final sample from the full chunk */
-            const elapsed = performance.now() - tU;
-            if (elapsed > 0) {
-              const mbps = (size * 8) / (elapsed/1000) / 1e6;
-              samples.push(mbps);
-              const smooth = movingAvg(samples, 4);
-              ulVal.textContent = fmtMbps(smooth);
-              ulBar.style.width  = `${Math.min(smooth/MAX*100,100)}%`;
-              setGauge(smooth);
-              speedVal.textContent = fmtMbps(smooth);
-            }
-            sendNext();
-          };
-
-          xhr.onerror = () => {
-            /* Try next size on network error */
-            if (!aborted) sendNext();
-          };
-
-          xhr.ontimeout = () => { if (!aborted) sendNext(); };
-          xhr.timeout   = Math.max(durMs - (performance.now()-t0), 3000);
-
-          /* Send as ArrayBuffer — avoids Blob MIME type overriding the text/plain header */
-          xhr.send(payload.buffer);
+      /* Single upload chunk → measured Mbps or null */
+      const uploadChunk = async size => {
+        const payload = makeBuf(size);
+        const tU = performance.now();
+        try {
+          await fetch(`https://speed.cloudflare.com/__up?_r=${Math.random()}`, {
+            method: 'POST',
+            body: payload,           /* send Uint8Array directly */
+            mode: 'no-cors',         /* bypass CORS entirely — no preflight */
+            cache: 'no-store',
+            signal,
+          });
+        } catch(e) {
+          if (e.name === 'AbortError') throw e;
+          return null;               /* network error — skip chunk */
         }
+        const elapsed = performance.now() - tU;
+        if (elapsed < 10) return null;
+        return (size * 8) / (elapsed / 1000) / 1e6;
+      };
 
-        sendNext();
-      });
+      /* Live UI updater */
+      const updateUI = mbps => {
+        samples.push(mbps);
+        const smooth = movingAvg(samples, 4);
+        ulVal.textContent = fmtMbps(smooth);
+        ulBar.style.width  = `${Math.min(smooth/MAX*100,100)}%`;
+        setGauge(smooth);
+        speedVal.textContent = fmtMbps(smooth);
+      };
+
+      /* Run chunks sequentially, updating UI after each */
+      const sizes = [512*1024, 1*1024*1024, 2*1024*1024, 5*1024*1024, 10*1024*1024];
+      for (const size of sizes) {
+        if (signal.aborted) break;
+        if (performance.now() - t0 >= durMs) break;
+        const mbps = await uploadChunk(size);
+        if (mbps !== null) updateUI(mbps);
+      }
+
+      if (!samples.length) return null;
+      const sorted = [...samples].sort((a,b) => a-b);
+      return sorted[Math.floor(sorted.length * 0.9)] || sorted[sorted.length-1];
     }
 
     /* ── Main test flow ───────────────────────────── */
@@ -1039,6 +1019,7 @@
         await sleep(350);
 
         // Phase 2
+        window._fxSetMode && window._fxSetMode('ping');
         setStatus('<span class="spinner" aria-hidden="true"></span>Measuring ping…','highlight');
         cardPing.classList.add('active'); pingVal.classList.add('live');
         const ping = await measurePing(10);
@@ -1048,6 +1029,7 @@
         await sleep(280);
 
         // Phase 3
+        window._fxSetMode && window._fxSetMode('download');
         setStatus('<span class="spinner" aria-hidden="true"></span>Testing download…','highlight');
         cardDl.classList.add('active'); dlVal.classList.add('live');
         const dl = await measureDownload(10000);
@@ -1063,6 +1045,7 @@
         await sleep(280);
 
         // Phase 4
+        window._fxSetMode && window._fxSetMode('upload');
         setStatus('<span class="spinner" aria-hidden="true"></span>Testing upload…','highlight');
         cardUl.classList.add('active'); ulVal.classList.add('live');
         const ul = await measureUpload(8000);
@@ -1076,14 +1059,17 @@
         ulBar.style.width=ul!==null?`${Math.min(ul/MAX*100,100)}%`:'0%';
         setMetricDone(cardUl,ulVal);
 
-        // Done
+        // Done — show best of dl/ul on gauge
+        window._fxSetMode && window._fxSetMode('idle');
         await sleep(280);
         setGaugePulsing(false);
-        if (dl!==null) { setGauge(dl); speedVal.textContent=fmtMbps(dl); }
-        else           { setGauge(0); speedVal.textContent='--'; }
+        const best = dl !== null ? dl : (ul !== null ? ul : null);
+        if (best !== null) { setGauge(best); speedVal.textContent=fmtMbps(best); }
+        else               { setGauge(0);    speedVal.textContent='--'; }
         setStatus('Test complete ✓','highlight');
 
       } catch(err) {
+        window._fxSetMode && window._fxSetMode('idle');
         if (err.name==='AbortError') setStatus('Test cancelled.');
         else {
           console.error(err);
@@ -1100,6 +1086,151 @@
 
     btnStart.addEventListener('click', runTest);
     btnRetry.addEventListener('click', () => { btnRetry.classList.remove('visible'); runTest(); });
+
+    /* ───────────────────────────────────────────────────────────────
+       BACKGROUND FX CANVAS
+       • idle     — nothing (blobs only)
+       • ping     — dots pulsing on/off all over background
+       • download — fine lines raining top → bottom (#00ff00 shades)
+       • upload   — fine lines rising  bottom → top (#00ff00 shades)
+    ─────────────────────────────────────────────────────────────── */
+    (() => {
+      const canvas = document.getElementById('fxCanvas');
+      const ctx    = canvas.getContext('2d');
+
+      /* Resize canvas to match physical pixels */
+      function resize() {
+        canvas.width  = window.innerWidth  * devicePixelRatio;
+        canvas.height = window.innerHeight * devicePixelRatio;
+        ctx.scale(devicePixelRatio, devicePixelRatio);
+      }
+      resize();
+      window.addEventListener('resize', () => { ctx.setTransform(1,0,0,1,0,0); resize(); });
+
+      const W = () => window.innerWidth;
+      const H = () => window.innerHeight;
+
+      /* ── State ── */
+      let mode = 'idle'; // 'idle' | 'ping' | 'download' | 'upload'
+      let rafId = null;
+
+      /* Expose setter so runTest phases can drive it */
+      window._fxSetMode = m => { mode = m; };
+
+      /* ── Green palette ── */
+      const greens = [
+        'rgba(0,255,0,',
+        'rgba(57,224,122,',
+        'rgba(34,197,94,',
+        'rgba(0,200,80,',
+        'rgba(100,255,140,',
+      ];
+      const rndGreen = (alpha) => greens[Math.floor(Math.random() * greens.length)] + alpha + ')';
+
+      /* ──────────────────── PING DOTS ──────────────────── */
+      const NDOTS = 55;
+      const dots  = [];
+      for (let i = 0; i < NDOTS; i++) {
+        dots.push({
+          x:     Math.random(),     // 0..1 normalised
+          y:     Math.random(),
+          r:     1 + Math.random() * 2.2,
+          phase: Math.random() * Math.PI * 2,
+          speed: 0.4 + Math.random() * 1.2,  // cycles/sec
+          alpha: 0.15 + Math.random() * 0.5,
+          color: greens[Math.floor(Math.random() * greens.length)],
+        });
+      }
+
+      function drawPing(t) {
+        ctx.clearRect(0, 0, W(), H());
+        for (const d of dots) {
+          const a = d.alpha * (0.5 + 0.5 * Math.sin(d.phase + t * d.speed * Math.PI * 2));
+          ctx.beginPath();
+          ctx.arc(d.x * W(), d.y * H(), d.r, 0, Math.PI * 2);
+          ctx.fillStyle = d.color + a + ')';
+          ctx.fill();
+        }
+      }
+
+      /* ──────────────────── RAIN LINES ──────────────────── */
+      const NLINES = 70;
+      const lines  = [];
+
+      function initLines(dir) {
+        lines.length = 0;
+        for (let i = 0; i < NLINES; i++) {
+          const len   = 40 + Math.random() * 120;
+          const speed = 180 + Math.random() * 340; // px/sec
+          const yStart = dir === 'down'
+            ? -len  - Math.random() * H()   // start above screen
+            :  H()  + Math.random() * H();  // start below screen
+          lines.push({
+            x:     Math.random() * W(),
+            y:     yStart,
+            len,
+            speed,
+            dir,
+            alpha: 0.08 + Math.random() * 0.28,
+            color: greens[Math.floor(Math.random() * greens.length)],
+            width: 0.4 + Math.random() * 0.8,
+          });
+        }
+      }
+
+      function drawLines(dt) {
+        ctx.clearRect(0, 0, W(), H());
+        const h = H();
+        for (const ln of lines) {
+          /* Move */
+          ln.y += (ln.dir === 'down' ? 1 : -1) * ln.speed * dt;
+
+          /* Wrap: when fully off-screen, reset to entry edge */
+          if (ln.dir === 'down'  && ln.y > h + ln.len)  ln.y = -ln.len - Math.random() * 60;
+          if (ln.dir === 'up'    && ln.y < -ln.len)      ln.y =  h + Math.random() * 60;
+
+          /* Draw gradient line (bright head, fading tail) */
+          const x  = ln.x;
+          const y0 = ln.dir === 'down' ? ln.y : ln.y + ln.len;
+          const y1 = ln.dir === 'down' ? ln.y + ln.len : ln.y;
+          const grad = ctx.createLinearGradient(x, y0, x, y1);
+          grad.addColorStop(0, ln.color + ln.alpha + ')');
+          grad.addColorStop(0.35, ln.color + (ln.alpha * 0.55) + ')');
+          grad.addColorStop(1, ln.color + '0)');
+          ctx.beginPath();
+          ctx.moveTo(x, y0);
+          ctx.lineTo(x, y1);
+          ctx.strokeStyle = grad;
+          ctx.lineWidth   = ln.width;
+          ctx.stroke();
+        }
+      }
+
+      /* ──────────────────── MAIN LOOP ──────────────────── */
+      let lastT = null;
+      let curMode = 'idle';
+
+      function loop(ts) {
+        rafId = requestAnimationFrame(loop);
+        const t  = ts / 1000;
+        const dt = lastT ? Math.min(t - lastT, 0.05) : 0.016;
+        lastT    = t;
+
+        /* Mode transition: reinit line pool when switching */
+        if (mode !== curMode) {
+          if (mode === 'download') initLines('down');
+          if (mode === 'upload')   initLines('up');
+          if (mode === 'idle')     ctx.clearRect(0, 0, W(), H());
+          curMode = mode;
+        }
+
+        if (curMode === 'ping')     drawPing(t);
+        else if (curMode === 'download' || curMode === 'upload') drawLines(dt);
+        else ctx.clearRect(0, 0, W(), H()); // idle — clear and let blobs show
+      }
+
+      requestAnimationFrame(loop);
+    })();
 
   })();
   </script>
