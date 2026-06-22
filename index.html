@@ -1235,8 +1235,8 @@
           const x       = ln.x;
           const segTop  = ln.y;
           const segBot  = ln.y + ln.len;
-          const brightY = ln.dir === 'down' ? segTop : segBot;
-          const fadeY   = ln.dir === 'down' ? segBot : segTop;
+          const brightY = ln.dir === 'down' ? segBot : segTop;
+          const fadeY   = ln.dir === 'down' ? segTop : segBot;
           const grad = ctx.createLinearGradient(x, brightY, x, fadeY);
           grad.addColorStop(0,    ln.color + ln.alpha + ')');
           grad.addColorStop(0.35, ln.color + (ln.alpha * 0.55) + ')');
