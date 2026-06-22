@@ -912,9 +912,10 @@
     async function measureDownload(durMs=10000) {
       let totalBytes=0, samples=[];
       const t0 = performance.now();
-      const runChunk = async url => {
+      /* Single streaming chunk — reads until durMs elapsed or stream ends */
+      const runChunk = async bytes => {
         try {
-          const resp = await fetch(url+`&_r=${Math.random()}`,{signal:abortCtrl.signal,cache:'no-store'});
+          const resp = await fetch(`https://speed.cloudflare.com/__down?bytes=${bytes}&_r=${Math.random()}`,{signal:abortCtrl.signal,cache:'no-store'});
           if (!resp.body) { const b=await resp.arrayBuffer(); totalBytes+=b.byteLength; return; }
           const reader = resp.body.getReader();
           while (true) {
@@ -932,12 +933,10 @@
           }
         } catch(e) { if(e.name!=='AbortError') throw e; }
       };
-      await Promise.allSettled([
-        runChunk('https://speed.cloudflare.com/__down?bytes=10000000'),
-        runChunk('https://speed.cloudflare.com/__down?bytes=25000000')
-      ]);
-      if (samples.length<3 && performance.now()-t0<durMs)
-        await runChunk('https://speed.cloudflare.com/__down?bytes=100000000');
+      /* Keep firing large chunks until durMs is truly elapsed */
+      while (performance.now() - t0 < durMs && !abortCtrl.signal.aborted) {
+        await runChunk(100000000); /* 100 MB — big enough to outlast any connection */
+      }
       if (!samples.length) return null;
       const sorted=[...samples].sort((a,b)=>a-b);
       return sorted[Math.floor(sorted.length*0.9)] || sorted[sorted.length-1];
@@ -993,11 +992,14 @@
         speedVal.textContent = fmtMbps(smooth);
       };
 
-      /* Run chunks sequentially, updating UI after each */
-      const sizes = [512*1024, 1*1024*1024, 2*1024*1024, 5*1024*1024, 10*1024*1024];
-      for (const size of sizes) {
-        if (signal.aborted) break;
-        if (performance.now() - t0 >= durMs) break;
+      /* Keep firing upload chunks until durMs is truly elapsed */
+      /* Use large payloads so each chunk actually stresses the link */
+      while (performance.now() - t0 < durMs && !signal.aborted) {
+        const elapsed = performance.now() - t0;
+        /* Grow chunk size as test progresses — start 2MB, ramp to 10MB */
+        const size = elapsed < 2000 ? 2*1024*1024
+                   : elapsed < 5000 ? 5*1024*1024
+                   :                  10*1024*1024;
         const mbps = await uploadChunk(size);
         if (mbps !== null) updateUI(mbps);
       }
