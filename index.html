@@ -940,12 +940,11 @@
         const onAbort = () => { aborted = true; xhr && xhr.abort(); resolve(null); };
         abortCtrl.signal.addEventListener('abort', onAbort, {once: true});
 
-        /* Build a compact random-ish payload (tile 32KB entropy) */
+        /* Build payload fast: fill with crypto entropy in 65536-byte chunks */
         const makeBuf = size => {
-          const seed = new Uint8Array(Math.min(size, 32768));
-          crypto.getRandomValues(seed);
-          const buf  = new Uint8Array(size);
-          for (let i=0; i<size; i++) buf[i] = seed[i % seed.length];
+          const buf = new Uint8Array(size);
+          for (let off = 0; off < size; off += 65536)
+            crypto.getRandomValues(buf.subarray(off, Math.min(off + 65536, size)));
           return buf;
         };
 
@@ -1009,7 +1008,8 @@
           xhr.ontimeout = () => { if (!aborted) sendNext(); };
           xhr.timeout   = Math.max(durMs - (performance.now()-t0), 3000);
 
-          xhr.send(new Blob([payload]));
+          /* Send as ArrayBuffer — avoids Blob MIME type overriding the text/plain header */
+          xhr.send(payload.buffer);
         }
 
         sendNext();
