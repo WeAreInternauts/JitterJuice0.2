@@ -1022,17 +1022,17 @@
         window._fxSetMode && window._fxSetMode('ping');
         setStatus('<span class="spinner" aria-hidden="true"></span>Measuring ping…','highlight');
         cardPing.classList.add('active'); pingVal.classList.add('live');
-        const ping = await measurePing(10);
+        const ping = await measurePing(18);
         pingVal.textContent=fmtMs(ping); pingVal.dataset.current=ping;
         pingBar.style.width=`${Math.min(ping/200*100,100)}%`;
         setMetricDone(cardPing,pingVal);
-        await sleep(280);
+        await sleep(1200);
 
         // Phase 3
         window._fxSetMode && window._fxSetMode('download');
         setStatus('<span class="spinner" aria-hidden="true"></span>Testing download…','highlight');
         cardDl.classList.add('active'); dlVal.classList.add('live');
-        const dl = await measureDownload(10000);
+        const dl = await measureDownload(15000);
         if (dl!==null) {
           await animateTo(dlVal,dl,550,fmtMbps,v=>{
             dlBar.style.width=`${Math.min(v/MAX*100,100)}%`;
@@ -1042,13 +1042,13 @@
         dlVal.textContent=dl!==null?fmtMbps(dl):'--';
         dlBar.style.width=dl!==null?`${Math.min(dl/MAX*100,100)}%`:'0%';
         setMetricDone(cardDl,dlVal);
-        await sleep(280);
+        await sleep(1200);
 
         // Phase 4
         window._fxSetMode && window._fxSetMode('upload');
         setStatus('<span class="spinner" aria-hidden="true"></span>Testing upload…','highlight');
         cardUl.classList.add('active'); ulVal.classList.add('live');
-        const ul = await measureUpload(8000);
+        const ul = await measureUpload(12000);
         if (ul!==null) {
           await animateTo(ulVal,ul,550,fmtMbps,v=>{
             ulBar.style.width=`${Math.min(v/MAX*100,100)}%`;
@@ -1061,7 +1061,7 @@
 
         // Done — show best of dl/ul on gauge
         window._fxSetMode && window._fxSetMode('idle');
-        await sleep(280);
+        await sleep(1200);
         setGaugePulsing(false);
         const best = dl !== null ? dl : (ul !== null ? ul : null);
         if (best !== null) { setGauge(best); speedVal.textContent=fmtMbps(best); }
@@ -1190,16 +1190,21 @@
           if (ln.dir === 'up'    && ln.y < -ln.len)      ln.y =  h + Math.random() * 60;
 
           /* Draw gradient line (bright head, fading tail) */
-          const x  = ln.x;
-          const y0 = ln.dir === 'down' ? ln.y : ln.y + ln.len;
-          const y1 = ln.dir === 'down' ? ln.y + ln.len : ln.y;
-          const grad = ctx.createLinearGradient(x, y0, x, y1);
-          grad.addColorStop(0, ln.color + ln.alpha + ')');
+          // ln.y = top of segment. 'down' moves +y (falls), 'up' moves -y (rises).
+          // 'down': head is the TOP edge (leading downward) → bright at ln.y, fade at ln.y+len
+          // 'up':   head is the BOTTOM edge (leading upward) → bright at ln.y+len, fade at ln.y
+          const x       = ln.x;
+          const segTop  = ln.y;
+          const segBot  = ln.y + ln.len;
+          const brightY = ln.dir === 'down' ? segTop : segBot;
+          const fadeY   = ln.dir === 'down' ? segBot : segTop;
+          const grad = ctx.createLinearGradient(x, brightY, x, fadeY);
+          grad.addColorStop(0,    ln.color + ln.alpha + ')');
           grad.addColorStop(0.35, ln.color + (ln.alpha * 0.55) + ')');
-          grad.addColorStop(1, ln.color + '0)');
+          grad.addColorStop(1,    ln.color + '0)');
           ctx.beginPath();
-          ctx.moveTo(x, y0);
-          ctx.lineTo(x, y1);
+          ctx.moveTo(x, segTop);
+          ctx.lineTo(x, segBot);
           ctx.strokeStyle = grad;
           ctx.lineWidth   = ln.width;
           ctx.stroke();
