@@ -1047,7 +1047,7 @@
         window._fxSetMode && window._fxSetMode('download');
         setStatus('<span class="spinner" aria-hidden="true"></span>Testing download…','highlight');
         cardDl.classList.add('active'); dlVal.classList.add('live');
-        const dl = await measureDownload(15000);
+        const dl = await measureDownload(10000);
         if (dl!==null) {
           await animateTo(dlVal,dl,550,fmtMbps,v=>{
             dlBar.style.width=`${Math.min(v/MAX*100,100)}%`;
@@ -1063,7 +1063,7 @@
         window._fxSetMode && window._fxSetMode('upload');
         setStatus('<span class="spinner" aria-hidden="true"></span>Testing upload…','highlight');
         cardUl.classList.add('active'); ulVal.classList.add('live');
-        const ul = await measureUpload(15000);
+        const ul = await measureUpload(10000);
         if (ul!==null) {
           await animateTo(ulVal,ul,550,fmtMbps,v=>{
             ulBar.style.width=`${Math.min(v/MAX*100,100)}%`;
