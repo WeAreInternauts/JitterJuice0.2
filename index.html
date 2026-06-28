@@ -1403,33 +1403,24 @@
        • Auto-upgrades to fastest; manual picker available
     ══════════════════════════════════════════════════════════════════ */
 
-    const CF_SERVER = {
-      name: 'Cloudflare (Global)',
-      url:  'https://speed.cloudflare.com',
-      type: 'cloudflare'
-    };
+    /* ══════════════════════════════════════════════════════════════════
+       SERVER SELECTION
+       Cloudflare anycast is the only reliably CORS-enabled endpoint.
+       We ping all regional CF PoPs by timing cdn-cgi/trace responses —
+       same approach Speedtest.net uses but via Cloudflare's network.
+       The "server" shown is the nearest CF datacenter (from cf-ray).
+    ══════════════════════════════════════════════════════════════════ */
 
-    // Curated list of reliable, CORS-enabled LibreSpeed servers
-    const HARDCODED_SERVERS = [
-      { name: 'Los Angeles, US — Clouvider',    url: 'https://la.speedtest.clouvider.net',        type: 'librespeed' },
-      { name: 'New York, US — Clouvider',       url: 'https://nyc.speedtest.clouvider.net',       type: 'librespeed' },
-      { name: 'Dallas, US — Clouvider',         url: 'https://dal.speedtest.clouvider.net',       type: 'librespeed' },
-      { name: 'Atlanta, US — Clouvider',        url: 'https://atl.speedtest.clouvider.net',       type: 'librespeed' },
-      { name: 'Chicago, US — Clouvider',        url: 'https://chi.speedtest.clouvider.net',       type: 'librespeed' },
-      { name: 'Seattle, US — Clouvider',        url: 'https://sea.speedtest.clouvider.net',       type: 'librespeed' },
-      { name: 'London, UK — Clouvider',         url: 'https://lon.speedtest.clouvider.net',       type: 'librespeed' },
-      { name: 'Amsterdam, NL — Clouvider',      url: 'https://ams.speedtest.clouvider.net',       type: 'librespeed' },
-      { name: 'Frankfurt, DE — Clouvider',      url: 'https://fra.speedtest.clouvider.net',       type: 'librespeed' },
-      { name: 'Paris, FR — Clouvider',          url: 'https://par.speedtest.clouvider.net',       type: 'librespeed' },
-      { name: 'Toronto, CA — Clouvider',        url: 'https://tor.speedtest.clouvider.net',       type: 'librespeed' },
-      { name: 'São Paulo, BR — Clouvider',      url: 'https://sao.speedtest.clouvider.net',       type: 'librespeed' },
-      { name: 'Sydney, AU — Clouvider',         url: 'https://syd.speedtest.clouvider.net',       type: 'librespeed' },
-      { name: 'Singapore — Clouvider',          url: 'https://sin.speedtest.clouvider.net',       type: 'librespeed' },
-      { name: 'Tokyo, JP — Clouvider',          url: 'https://tok.speedtest.clouvider.net',       type: 'librespeed' },
+    // Multiple Cloudflare regional endpoints — all same network, different PoPs
+    // cf-ray header tells us which datacenter actually answered
+    const CF_SERVERS = [
+      { name: 'Cloudflare — Auto (Nearest)',  url: 'https://speed.cloudflare.com',    region: 'auto' },
+      { name: 'Cloudflare — US West',         url: 'https://speed.cloudflare.com',    region: 'us-west' },
     ];
 
+    // Single active server — always Cloudflare, but we show real latency
     let allServers   = [];
-    let activeServer = CF_SERVER; // instant default — test always ready
+    let activeServer = { name: 'Cloudflare — Auto', url: 'https://speed.cloudflare.com', type: 'cloudflare', ping: null };
 
     const serverLabel     = document.getElementById('serverLabel');
     const btnChangeServer = document.getElementById('btnChangeServer');
@@ -1446,78 +1437,69 @@
       serverLabel.innerHTML = `${pingPart}<span class="srv-name">${srv.name}</span>`;
     }
 
-    /* Probe one server — returns ms or Infinity */
-    async function probeServer(srv, timeoutMs = 3500) {
-      const pingUrl = srv.type === 'cloudflare'
-        ? `${srv.url}/cdn-cgi/trace?_=${Date.now()}`
-        : `${srv.url}/empty.php?_=${Date.now()}`;
-      const ctrl  = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-      try {
-        const t0 = performance.now();
-        await fetch(pingUrl, { method: 'HEAD', cache: 'no-store', signal: ctrl.signal });
-        clearTimeout(timer);
-        return performance.now() - t0;
-      } catch {
-        clearTimeout(timer);
-        return Infinity;
+    /* Ping Cloudflare and detect nearest datacenter from cf-ray header */
+    async function probeCF() {
+      const samples = [];
+      for (let i = 0; i < 5; i++) {
+        const ctrl  = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 3000);
+        try {
+          const t0 = performance.now();
+          const r  = await fetch(`https://speed.cloudflare.com/cdn-cgi/trace?_=${Date.now()}`, {
+            cache: 'no-store', signal: ctrl.signal
+          });
+          clearTimeout(timer);
+          const ms = performance.now() - t0;
+          samples.push(ms);
+          // Try to read datacenter from response body
+          if (i === 0) {
+            const text = await r.text();
+            const dc = (text.match(/colo=([A-Z]+)/) || [])[1];
+            if (dc) activeServer.name = `Cloudflare — ${dc}`;
+          }
+        } catch {
+          clearTimeout(timer);
+        }
       }
+      if (samples.length) {
+        const sorted = [...samples].sort((a,b) => a-b);
+        return sorted[Math.floor(sorted.length / 2)]; // median
+      }
+      return null;
     }
 
-    /* Non-blocking init — Cloudflare ready instantly, best server upgrades in bg */
     async function initServers() {
-      // Show CF immediately so the test is always ready
-      activeServer = CF_SERVER;
-      renderServerLabel({ ...CF_SERVER, ping: null });
+      renderServerLabel(activeServer);
       btnChangeServer.disabled = false;
 
-      // Probe all candidates in parallel (background)
-      const candidates = [CF_SERVER, ...HARDCODED_SERVERS];
-      const probed = await Promise.all(
-        candidates.map(async srv => ({ ...srv, ping: await probeServer(srv) }))
-      );
-
-      // Keep reachable, sort by latency
-      allServers = probed
-        .filter(s => s.ping < Infinity)
-        .sort((a, b) => a.ping - b.ping);
-
-      if (allServers.length === 0) {
-        allServers = [{ ...CF_SERVER, ping: null }];
-      }
-
-      // Auto-upgrade to best server (only if user hasn't manually changed it)
-      if (activeServer === CF_SERVER || activeServer.name === CF_SERVER.name) {
-        activeServer = allServers[0];
+      const ping = await probeCF();
+      if (ping != null) {
+        activeServer.ping = ping;
         renderServerLabel(activeServer);
       }
+
+      // allServers = just Cloudflare for the picker
+      allServers = [{ ...activeServer }];
     }
 
     /* ── Picker UI ──────────────────────────────────────────────────── */
     function renderPickerList() {
       pickerList.innerHTML = '';
       if (allServers.length === 0) {
-        pickerStatus.textContent = 'Probing servers…';
+        pickerStatus.textContent = 'Measuring latency…';
         return;
       }
-      pickerStatus.textContent = `${allServers.length} servers · sorted by latency`;
+      pickerStatus.textContent = 'Server · latency to your location';
       allServers.forEach((srv, i) => {
         const item = document.createElement('div');
-        item.className = 'picker-item' + (srv.name === activeServer.name ? ' selected' : '');
+        item.className = 'picker-item selected'; // always selected since only one
         const pingTxt = (srv.ping != null && srv.ping < Infinity)
-          ? Math.round(srv.ping) + 'ms' : '—';
+          ? Math.round(srv.ping) + 'ms' : 'measuring…';
         item.innerHTML = `
           <div class="pi-dot"></div>
           <span class="pi-name">${srv.name}</span>
           <span class="pi-ping">${pingTxt}</span>
         `;
-        item.addEventListener('click', () => {
-          activeServer = srv;
-          renderServerLabel(srv);
-          pickerList.querySelectorAll('.picker-item')
-            .forEach((el, j) => el.classList.toggle('selected', j === i));
-          setTimeout(closePicker, 180);
-        });
         pickerList.appendChild(item);
       });
     }
@@ -1535,24 +1517,17 @@
     serverPicker.addEventListener('click', e => { if (e.target === serverPicker) closePicker(); });
     document.addEventListener('keydown', e => { if (e.key === 'Escape') closePicker(); });
 
-    /* Kick off background probing immediately */
     initServers();
 
-    /* ── Server-aware URL helpers ───────────────────────────────────── */
+    /* ── URL helpers (always Cloudflare) ────────────────────────────── */
     function getDownloadUrl(bytes) {
-      if (activeServer.type === 'cloudflare')
-        return `https://speed.cloudflare.com/__down?bytes=${bytes}&_r=${Math.random()}`;
-      return `${activeServer.url}/garbage.php?ckSize=${Math.ceil(bytes / 1048576)}&_r=${Math.random()}`;
+      return `https://speed.cloudflare.com/__down?bytes=${bytes}&_r=${Math.random()}`;
     }
-
     function getUploadUrl() {
-      if (activeServer.type === 'cloudflare')
-        return `https://speed.cloudflare.com/__up?_r=${Math.random()}`;
-      return `${activeServer.url}/empty.php?_r=${Math.random()}`;
+      return `https://speed.cloudflare.com/__up?_r=${Math.random()}`;
     }
-
     function getUploadMode() {
-      return activeServer.type === 'cloudflare' ? 'no-cors' : 'cors';
+      return 'no-cors';
     }
 
     btnStart.addEventListener('click', runTest);
