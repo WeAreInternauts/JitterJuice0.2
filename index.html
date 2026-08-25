@@ -1169,57 +1169,146 @@
       return null;
     }
 
-    /* ── Ping ─────────────────────────────────────── */
-    async function measurePing(n=9) {
+    /* ── Ping ────────────────────────────────────────────────────────────
+       Fixed: previously included full TLS handshake in every measurement.
+       Now: warm the connection first (2 discards), then measure only
+       time-to-first-byte on HTTP/2 requests over the reused connection.
+       Also measures jitter (variance) for future display.
+    ─────────────────────────────────────────────────────────────────────── */
+    async function measurePing(n=15) {
+      const pingUrl = 'https://speed.cloudflare.com/__down?bytes=0';
+
+      /* Warmup: reuse HTTP/2 connection */
+      for (let i = 0; i < 2; i++) {
+        try { await fetch(pingUrl + '&_w=' + i, {signal: abortCtrl.signal, cache: 'no-store'}); } catch {}
+      }
+
       const results = [];
-      for (let i=0; i<n; i++) {
+      for (let i = 0; i < n; i++) {
+        if (abortCtrl.signal.aborted) break;
         const t0 = performance.now();
         try {
-          await fetch(`https://cloudflare.com/cdn-cgi/trace?t=${Date.now()}_${i}`,{signal:abortCtrl.signal,cache:'no-store',method:'HEAD'});
-        } catch {
-          try { await fetch(`https://www.cloudflare.com/favicon.ico?t=${Date.now()}`,{signal:abortCtrl.signal,cache:'no-store',mode:'no-cors'}); } catch {}
-        }
-        results.push(performance.now() - t0);
-        const med = median(results);
+          const r = await fetch(pingUrl + '&_p=' + i, {signal: abortCtrl.signal, cache: 'no-store'});
+          await r.arrayBuffer();
+        } catch { continue; }
+        const ms = performance.now() - t0;
+        results.push(ms);
+        /* Live UI: rolling median of last 5 */
+        const recent = results.slice(-5).sort((a,b) => a-b);
+        const med = recent[Math.floor(recent.length/2)];
         pingVal.textContent = fmtMs(med);
         pingBar.style.width = `${Math.min(med/200*100,100)}%`;
-        await sleep(45);
+        await sleep(25);
       }
-      return Math.round(median(results.slice(1)));
+      if (results.length === 0) return 0;
+
+      /* Discard worst 20% (outliers), take median of rest */
+      const sorted = [...results].sort((a,b) => a-b);
+      const keep = sorted.slice(0, Math.max(3, Math.floor(sorted.length * 0.8)));
+      const median = keep[Math.floor(keep.length/2)];
+
+      /* Jitter: mean absolute deviation from median */
+      const jitter = keep.reduce((s,v) => s + Math.abs(v - median), 0) / keep.length;
+      window._lastJitter = Math.round(jitter * 10) / 10;
+
+      return Math.round(median);
     }
 
-    /* ── Download ─────────────────────────────────── */
+    /* ── Download ────────────────────────────────────────────────────────
+       Fixed: previously ran a single stream and computed cumulative
+       average from t=0 (dragged down by TCP slow-start).
+       Now:
+         • 6 parallel streams saturate multi-gigabit links
+         • 1s warmup phase excluded from measurement
+         • Windowed throughput (bytes-per-window) computed every 100ms
+         • Final result = top 30% average (matches LibreSpeed methodology)
+    ─────────────────────────────────────────────────────────────────────── */
     async function measureDownload(durMs=10000) {
-      let totalBytes=0, samples=[];
+      const WARMUP_MS  = 1500;
+      const STREAMS    = 6;
+      const CHUNK_BYTES = 200 * 1024 * 1024; /* 200 MB per stream, way more than needed */
+
+      let totalBytes = 0;
+      const activeReaders = new Set();
+      const windowSamples = [];  /* [{t, bytes}] */
       const t0 = performance.now();
-      /* Single streaming chunk — reads until durMs elapsed or stream ends */
-      const runChunk = async bytes => {
-        try {
-          const resp = await fetch(getDownloadUrl(bytes),{signal:abortCtrl.signal,cache:'no-store'});
-          if (!resp.body) { const b=await resp.arrayBuffer(); totalBytes+=b.byteLength; return; }
-          const reader = resp.body.getReader();
-          while (true) {
-            const {done,value} = await reader.read();
-            if (done) break;
-            totalBytes += value.byteLength;
-            const elapsed = performance.now()-t0;
-            const mbps = (totalBytes*8)/(elapsed/1000)/1e6;
-            samples.push(mbps);
-            const smooth = movingAvg(samples,6);
-            dlVal.textContent = fmtMbps(smooth);
-            dlBar.style.width = `${Math.min(smooth/MAX*100,100)}%`;
-            setGauge(smooth); speedVal.textContent = fmtMbps(smooth);
-            if (elapsed >= durMs) { reader.cancel(); break; }
+      let measureStart = null;   /* set after warmup */
+
+      const runStream = async (streamId) => {
+        while (performance.now() - t0 < durMs && !abortCtrl.signal.aborted) {
+          try {
+            const resp = await fetch(getDownloadUrl(CHUNK_BYTES) + '&_s=' + streamId,
+              {signal: abortCtrl.signal, cache: 'no-store'});
+            if (!resp.body) {
+              const b = await resp.arrayBuffer();
+              totalBytes += b.byteLength;
+              continue;
+            }
+            const reader = resp.body.getReader();
+            activeReaders.add(reader);
+            try {
+              while (true) {
+                const {done, value} = await reader.read();
+                if (done) break;
+                totalBytes += value.byteLength;
+                if (performance.now() - t0 >= durMs) {
+                  reader.cancel();
+                  break;
+                }
+              }
+            } finally {
+              activeReaders.delete(reader);
+            }
+          } catch (e) {
+            if (e.name === 'AbortError') return;
+            /* Network hiccup — brief pause then retry */
+            await sleep(50);
           }
-        } catch(e) { if(e.name!=='AbortError') throw e; }
+        }
       };
-      /* Keep firing large chunks until durMs is truly elapsed */
-      while (performance.now() - t0 < durMs && !abortCtrl.signal.aborted) {
-        await runChunk(100000000); /* 100 MB — big enough to outlast any connection */
-      }
-      if (!samples.length) return null;
-      const sorted=[...samples].sort((a,b)=>a-b);
-      return sorted[Math.floor(sorted.length*0.9)] || sorted[sorted.length-1];
+
+      /* Sampler: instant throughput every 100ms based on bytes since last sample */
+      let lastBytes = 0, lastT = t0;
+      const sampler = setInterval(() => {
+        const now = performance.now();
+        const elapsed = now - t0;
+        const deltaBytes = totalBytes - lastBytes;
+        const deltaT = now - lastT;
+        if (deltaT > 0 && elapsed > 250) {
+          const instantMbps = (deltaBytes * 8) / (deltaT / 1000) / 1e6;
+          if (elapsed >= WARMUP_MS) {
+            if (measureStart === null) measureStart = now;
+            windowSamples.push(instantMbps);
+          }
+          /* Live UI: smoothed recent samples */
+          const recent = windowSamples.slice(-8);
+          const smooth = recent.length ? recent.reduce((a,b) => a+b, 0) / recent.length : instantMbps;
+          dlVal.textContent = fmtMbps(smooth);
+          dlBar.style.width = `${Math.min(smooth/MAX*100,100)}%`;
+          setGauge(smooth);
+          speedVal.textContent = fmtMbps(smooth);
+          setSpeedUnit(smooth); setDlUnit(smooth);
+        }
+        lastBytes = totalBytes;
+        lastT = now;
+      }, 100);
+
+      /* Launch parallel streams */
+      const streams = [];
+      for (let i = 0; i < STREAMS; i++) streams.push(runStream(i));
+
+      /* Wait until duration elapses */
+      await new Promise(r => setTimeout(r, durMs));
+      /* Cancel all in-flight readers */
+      for (const rd of activeReaders) { try { rd.cancel(); } catch {} }
+      clearInterval(sampler);
+      await Promise.allSettled(streams);
+
+      if (windowSamples.length === 0) return null;
+      /* Top 30% average — represents sustained throughput */
+      const sorted = [...windowSamples].sort((a,b) => b-a);
+      const top = sorted.slice(0, Math.max(3, Math.floor(sorted.length * 0.3)));
+      return top.reduce((a,b) => a+b, 0) / top.length;
     }
 
     /* ── Upload ───────────────────────────────────────────────────────────
@@ -1229,64 +1318,91 @@
        Parallel workers saturate the link on fast connections.
     ───────────────────────────────────────────────────────────────────── */
     async function measureUpload(durMs=10000) {
-      const samples  = [];
-      const t0       = performance.now();
-      const signal   = abortCtrl.signal;
+      /* Fixed: previously used mode:'no-cors' which returns immediately when
+         the request is queued to the OS socket buffer — not actual transfer time.
+         Now: use XHR with upload progress events which gives us bytes-actually-sent
+         over the wire, then windowed throughput like the download side.
+         6 parallel workers to saturate upstream. */
+      const WARMUP_MS = 1500;
+      const WORKERS   = 4;
+      const t0        = performance.now();
+      const signal    = abortCtrl.signal;
+      const windowSamples = [];
+      let totalBytesSent = 0;
+      let stopping = false;
+      const activeXHRs = new Set();
 
-      /* Build payload: crypto.getRandomValues in 65536-byte chunks (PRNG pre-warmed) */
-      const makeBuf = size => {
-        const buf = new Uint8Array(size);
-        for (let off = 0; off < size; off += 65536)
-          crypto.getRandomValues(buf.subarray(off, Math.min(off + 65536, size)));
-        return buf;
-      };
+      /* Pre-generate one reusable random payload — regenerating per request
+         wastes CPU and drops fast-link throughput */
+      const CHUNK_SIZE = 8 * 1024 * 1024; /* 8MB per upload chunk */
+      const chunk = new Uint8Array(CHUNK_SIZE);
+      for (let off = 0; off < CHUNK_SIZE; off += 65536)
+        crypto.getRandomValues(chunk.subarray(off, Math.min(off + 65536, CHUNK_SIZE)));
 
-      /* Single upload chunk → measured Mbps or null */
-      const uploadChunk = async size => {
-        const payload = makeBuf(size);
-        const tU = performance.now();
-        try {
-          await fetch(getUploadUrl(), {
-            method: 'POST',
-            body: payload,
-            mode: getUploadMode(),   /* no-cors for CF, cors for LibreSpeed */
-            cache: 'no-store',
-            signal,
-          });
-        } catch(e) {
-          if (e.name === 'AbortError') throw e;
-          return null;               /* network error — skip chunk */
+      /* Send one chunk via XHR — resolves when the upload progress reaches end */
+      const sendChunk = () => new Promise((resolve, reject) => {
+        if (stopping || signal.aborted) return resolve(0);
+        const xhr = new XMLHttpRequest();
+        activeXHRs.add(xhr);
+        let lastLoaded = 0;
+        xhr.upload.addEventListener('progress', (e) => {
+          if (e.loaded > lastLoaded) {
+            totalBytesSent += (e.loaded - lastLoaded);
+            lastLoaded = e.loaded;
+          }
+        });
+        xhr.upload.addEventListener('loadend', () => {
+          activeXHRs.delete(xhr);
+          resolve(lastLoaded);
+        });
+        xhr.addEventListener('error', () => { activeXHRs.delete(xhr); resolve(0); });
+        xhr.addEventListener('abort', () => { activeXHRs.delete(xhr); resolve(0); });
+        signal.addEventListener('abort', () => { try { xhr.abort(); } catch {} }, {once:true});
+        xhr.open('POST', getUploadUrl(), true);
+        xhr.send(chunk);
+      });
+
+      const runWorker = async () => {
+        while (!stopping && !signal.aborted && performance.now() - t0 < durMs) {
+          await sendChunk();
         }
-        const elapsed = performance.now() - tU;
-        if (elapsed < 10) return null;
-        return (size * 8) / (elapsed / 1000) / 1e6;
       };
 
-      /* Live UI updater */
-      const updateUI = mbps => {
-        samples.push(mbps);
-        const smooth = movingAvg(samples, 4);
-        ulVal.textContent = fmtMbps(smooth); setUlUnit(smooth);
-        ulBar.style.width  = `${Math.min(smooth/MAX*100,100)}%`;
-        setGauge(smooth);
-        speedVal.textContent = fmtMbps(smooth); setSpeedUnit(smooth);
-      };
+      /* Sampler: windowed instant throughput */
+      let lastBytes = 0, lastT = t0;
+      const sampler = setInterval(() => {
+        const now = performance.now();
+        const elapsed = now - t0;
+        const deltaBytes = totalBytesSent - lastBytes;
+        const deltaT = now - lastT;
+        if (deltaT > 0 && elapsed > 250) {
+          const instantMbps = (deltaBytes * 8) / (deltaT / 1000) / 1e6;
+          if (elapsed >= WARMUP_MS) windowSamples.push(instantMbps);
+          const recent = windowSamples.slice(-8);
+          const smooth = recent.length ? recent.reduce((a,b) => a+b, 0) / recent.length : instantMbps;
+          ulVal.textContent = fmtMbps(smooth); setUlUnit(smooth);
+          ulBar.style.width = `${Math.min(smooth/MAX*100,100)}%`;
+          setGauge(smooth);
+          speedVal.textContent = fmtMbps(smooth); setSpeedUnit(smooth);
+        }
+        lastBytes = totalBytesSent;
+        lastT = now;
+      }, 100);
 
-      /* Keep firing upload chunks until durMs is truly elapsed */
-      /* Use large payloads so each chunk actually stresses the link */
-      while (performance.now() - t0 < durMs && !signal.aborted) {
-        const elapsed = performance.now() - t0;
-        /* Grow chunk size as test progresses — start 2MB, ramp to 10MB */
-        const size = elapsed < 2000 ? 2*1024*1024
-                   : elapsed < 5000 ? 5*1024*1024
-                   :                  10*1024*1024;
-        const mbps = await uploadChunk(size);
-        if (mbps !== null) updateUI(mbps);
-      }
+      /* Launch workers */
+      const workers = [];
+      for (let i = 0; i < WORKERS; i++) workers.push(runWorker());
 
-      if (!samples.length) return null;
-      const sorted = [...samples].sort((a,b) => a-b);
-      return sorted[Math.floor(sorted.length * 0.9)] || sorted[sorted.length-1];
+      await new Promise(r => setTimeout(r, durMs));
+      stopping = true;
+      for (const xhr of activeXHRs) { try { xhr.abort(); } catch {} }
+      clearInterval(sampler);
+      await Promise.allSettled(workers);
+
+      if (windowSamples.length === 0) return null;
+      const sorted = [...windowSamples].sort((a,b) => b-a);
+      const top = sorted.slice(0, Math.max(3, Math.floor(sorted.length * 0.3)));
+      return top.reduce((a,b) => a+b, 0) / top.length;
     }
 
     /* ── Main test flow ───────────────────────────── */
