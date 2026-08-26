@@ -56,6 +56,9 @@
 
   <!-- Fonts: Cabinet Grotesk (display) + Satoshi (body) -->
   <link href="https://api.fontshare.com/v2/css?f[]=cabinet-grotesk@100,200,300,400,500,700,800,900&f[]=satoshi@300,400,500,700&display=swap" rel="stylesheet">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500&display=swap" rel="stylesheet">
 
   <style>
     /* ── Tokens ─────────────────────────────────────── */
@@ -278,6 +281,32 @@
       text-align: center;
       margin-top: var(--space-1);
       user-select: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5em;
+      width: 100%;
+    }
+    .copyright .internauts-mark {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35em;
+      opacity: 0.9;
+    }
+    .copyright .internauts-mark svg {
+      width: 0.85em;
+      height: auto;
+      display: block;
+    }
+    .copyright .internauts-mark svg path { fill: currentColor; }
+    .copyright .internauts-mark .wordmark {
+      font-family: 'Space Grotesk', var(--font-body), sans-serif;
+      font-weight: 400;
+      font-size: 1.1em;
+      letter-spacing: -0.04em;
+      text-transform: lowercase;
+      line-height: 1;
+      color: inherit;
     }
 
     /* Internauts badge — fixed bottom-right */
@@ -380,13 +409,13 @@
     }
     .gauge-arc.pulsing { animation: gauge-glow-pulse 1.4s ease-in-out infinite; }
 
-    /* Speed readout — positioned in center of arc */
+    /* Speed readout — aligned to base of gauge arc */
     .speed-display {
       position: absolute;
-      /* Center it vertically within the arc's open bowl */
-      top: 38%;
+      /* Anchor to bottom of gauge so number sits at the arc's base */
+      bottom: 4%;
       left: 50%;
-      transform: translate(-50%, -50%);
+      transform: translateX(-50%);
       display: flex;
       flex-direction: column;
       align-items: center;
@@ -397,8 +426,8 @@
     }
     .speed-value {
       font-family: var(--font-display);
-      /* Scales with both viewport width and the gauge's actual rendered size */
-      font-size: clamp(2.8rem, min(10vw, 14vh), 4.5rem);
+      /* 25% larger than previous — scales with viewport + gauge size */
+      font-size: clamp(3.5rem, min(12.5vw, 17.5vh), 5.625rem);
       font-weight: 200;
       letter-spacing: -0.05em;
       color: var(--text);
@@ -1015,8 +1044,14 @@
           </button>
         </div>
 
-        <!-- Copyright line -->
-        <p class="copyright">2026 &copy; Made by Internauts</p>
+        <!-- Copyright line — Internauts logo replaces the word -->
+        <p class="copyright">
+          <span>2026 &copy; Made by</span>
+          <a href="https://internauts.design" target="_blank" rel="noopener" class="internauts-mark" aria-label="Internauts">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 230.763 156.105" aria-hidden="true"><path d="M192.303 10.407v18.212c0 5.748-4.592 10.407-10.256 10.407h-56.41c-5.664 0-10.255-4.66-10.255-10.407V10.407C115.382 4.659 110.79 0 105.125 0H87.177c-5.664 0-10.256 4.66-10.256 10.407v57.238c0 5.748-4.592 10.407-10.256 10.407H48.716c-5.664 0-10.256 4.66-10.256 10.407v18.213c0 5.747 4.592 10.407 10.256 10.407h56.41c5.664 0 10.255 4.659 10.255 10.407v18.212c0 5.747 4.592 10.407 10.257 10.407h56.409c5.664 0 10.256-4.66 10.256-10.407v-18.212c0-5.748 4.592-10.407 10.256-10.407h17.948c5.665 0 10.257-4.66 10.257-10.407V10.407C230.764 4.659 226.172 0 220.507 0H202.56c-5.664 0-10.256 4.66-10.256 10.407ZM0 49.433v18.212c0 5.748 4.592 10.407 10.256 10.407h17.948c5.665 0 10.257-4.659 10.257-10.407V49.433c0-5.747-4.592-10.407-10.256-10.407H10.256C4.592 39.026 0 43.686 0 49.433"/></svg>
+            <span class="wordmark">internauts</span>
+          </a>
+        </p>
 
       </div><!-- .card -->
 
