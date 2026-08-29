@@ -751,6 +751,78 @@
       color: var(--accent);
       font-weight: 300;
     }
+    .server-label .srv-auto {
+      display: inline-block;
+      font-size: 0.55rem;
+      font-weight: 500;
+      letter-spacing: 0.12em;
+      color: var(--accent);
+      background: rgba(0, 255, 0, 0.08);
+      border: 1px solid rgba(0, 255, 0, 0.25);
+      border-radius: 3px;
+      padding: 1px 5px;
+      margin-right: 4px;
+      vertical-align: 1px;
+      line-height: 1.2;
+    }
+    /* Location + auto-toggle strip at top of the picker */
+    .loc-line {
+      font-size: 0.75rem;
+      color: rgba(255,255,255,0.5);
+      margin-bottom: 10px;
+      letter-spacing: 0.01em;
+    }
+    .loc-line strong {
+      color: rgba(255,255,255,0.85);
+      font-weight: 400;
+    }
+    .picker-tools {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 14px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+    }
+    .auto-chip {
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.14);
+      border-radius: 999px;
+      color: rgba(255,255,255,0.55);
+      font-family: inherit;
+      font-size: 0.65rem;
+      font-weight: 500;
+      letter-spacing: 0.1em;
+      padding: 4px 12px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .auto-chip:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+    .auto-chip.on {
+      background: rgba(0, 255, 0, 0.1);
+      border-color: rgba(0, 255, 0, 0.4);
+      color: var(--accent);
+    }
+    .picker-hint {
+      font-size: 0.72rem;
+      color: rgba(255,255,255,0.4);
+      letter-spacing: 0.01em;
+    }
+    /* Distance readout inside each picker row */
+    .picker-item .pi-dist {
+      font-size: 0.68rem;
+      color: rgba(255,255,255,0.32);
+      font-weight: 300;
+      letter-spacing: 0.01em;
+      margin-right: 4px;
+      font-variant-numeric: tabular-nums;
+    }
+    .picker-item.selected .pi-dist {
+      color: rgba(0, 255, 0, 0.55);
+    }
     .btn-change-server {
       background: none;
       border: 1px solid rgba(255,255,255,0.12);
@@ -1639,15 +1711,15 @@
         base: 'https://speed.cloudflare.com', canTest: true, primary: true,
         probeUrl: 'https://speed.cloudflare.com/cdn-cgi/trace' },
       { id: 'shark-lax', name: 'Los Angeles (Sharktech)', type: 'librespeed',
-        base: 'https://laxspeed.sharktech.net', canTest: true },
+        base: 'https://laxspeed.sharktech.net', canTest: true, lat: 34.05, lon: -118.24 },
       { id: 'shark-las', name: 'Las Vegas (Sharktech)',   type: 'librespeed',
-        base: 'https://lasspeed.sharktech.net', canTest: true },
+        base: 'https://lasspeed.sharktech.net', canTest: true, lat: 36.17, lon: -115.14 },
       { id: 'shark-den', name: 'Denver (Sharktech)',      type: 'librespeed',
-        base: 'https://denspeed.sharktech.net', canTest: true },
+        base: 'https://denspeed.sharktech.net', canTest: true, lat: 39.74, lon: -104.99 },
       { id: 'shark-chi', name: 'Chicago (Sharktech)',     type: 'librespeed',
-        base: 'https://chispeed.sharktech.net', canTest: true },
+        base: 'https://chispeed.sharktech.net', canTest: true, lat: 41.88, lon: -87.63 },
       { id: 'shark-ams', name: 'Amsterdam (Sharktech)',   type: 'librespeed',
-        base: 'https://amsspeed.sharktech.net', canTest: true },
+        base: 'https://amsspeed.sharktech.net', canTest: true, lat: 52.37, lon: 4.90 },
       /* Ping-only alt hosts to see where your traffic actually routes */
       { id: 'google',     name: 'Google',            type: 'ping',
         probeUrl: 'https://www.google.com/generate_204', canTest: false },
@@ -1659,11 +1731,70 @@
         probeUrl: 'https://github.githubassets.com/favicon.ico', canTest: false },
     ];
 
+    /* User's approximate location (from IP geolocation), populated on init.
+       Used for initial "nearest server" auto-select and shown in the picker. */
+    let userGeo = null; /* { lat, lon, city, region, country, source } */
+
+    /* Haversine distance in km — accurate enough for "which server is closer". */
+    function distanceKm(lat1, lon1, lat2, lon2) {
+      const R = 6371;
+      const toRad = d => d * Math.PI / 180;
+      const dLat = toRad(lat2 - lat1);
+      const dLon = toRad(lon2 - lon1);
+      const a = Math.sin(dLat/2) ** 2
+              + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon/2) ** 2;
+      return 2 * R * Math.asin(Math.sqrt(a));
+    }
+
+    /* Free CORS-enabled geo-IP APIs. Try primary; fall back on failure/timeout. */
+    async function fetchGeoIP() {
+      const providers = [
+        { name: 'ipwho.is', url: 'https://ipwho.is/', map: d => d.success && {
+            lat: d.latitude, lon: d.longitude,
+            city: d.city, region: d.region, country: d.country_code, source: 'ipwho.is'
+          }},
+        { name: 'ipinfo.io', url: 'https://ipinfo.io/json', map: d => {
+            const [lat, lon] = (d.loc || '').split(',').map(Number);
+            if (!Number.isFinite(lat)) return null;
+            return { lat, lon, city: d.city, region: d.region, country: d.country, source: 'ipinfo.io' };
+          }},
+      ];
+      for (const p of providers) {
+        try {
+          const ctrl = new AbortController();
+          const t = setTimeout(() => ctrl.abort(), 3500);
+          const r = await fetch(p.url, { signal: ctrl.signal, cache: 'no-store' });
+          clearTimeout(t);
+          if (!r.ok) continue;
+          const d = await r.json();
+          const mapped = p.map(d);
+          if (mapped && Number.isFinite(mapped.lat) && Number.isFinite(mapped.lon)) return mapped;
+        } catch {}
+      }
+      return null;
+    }
+
+    /* Rank all testable Sharktech servers by great-circle distance from `geo`.
+       Cloudflare has no meaningful coord (anycast) and is excluded from ranking. */
+    function nearestByGeo(geo) {
+      if (!geo) return null;
+      const cands = allServers
+        .filter(s => s.canTest && Number.isFinite(s.lat) && Number.isFinite(s.lon))
+        .map(s => ({ srv: s, km: distanceKm(geo.lat, geo.lon, s.lat, s.lon) }))
+        .sort((a, b) => a.km - b.km);
+      return cands[0] || null;
+    }
+
     let allServers   = SERVERS.map(s => ({ ...s, ping: null }));
-    /* Persist selected server across reloads */
-    const STORED_ID  = (() => { try { return localStorage.getItem('jj:serverId'); } catch { return null; } })();
-    let activeServer = allServers.find(s => s.id === STORED_ID) || allServers[0];
+    /* Persist selected server across reloads.
+       autoMode=true means "pick the closest each session" — the id stored is just
+       the last auto-picked one, used as a temp label until geo/probes finish. */
+    const STORED_ID   = (() => { try { return localStorage.getItem('jj:serverId'); } catch { return null; } })();
+    const STORED_AUTO = (() => { try { return localStorage.getItem('jj:autoMode') !== 'false'; } catch { return true; } })();
+    let autoMode      = STORED_AUTO; /* default: auto on first visit */
+    let activeServer  = allServers.find(s => s.id === STORED_ID) || allServers[0];
     function saveActive() { try { localStorage.setItem('jj:serverId', activeServer.id); } catch {} }
+    function saveAuto()   { try { localStorage.setItem('jj:autoMode', autoMode ? 'true' : 'false'); } catch {} }
 
     const serverLabel     = document.getElementById('serverLabel');
     const btnChangeServer = document.getElementById('btnChangeServer');
@@ -1677,7 +1808,10 @@
       const pingPart = (srv.ping != null && srv.ping < Infinity)
         ? `<span class="srv-ping">${Math.round(srv.ping)}ms</span> · `
         : '';
-      serverLabel.innerHTML = `${pingPart}<span class="srv-name">${srv.name}</span>`;
+      const autoPart = autoMode
+        ? `<span class="srv-auto" title="Auto-selected by your location">AUTO</span> `
+        : '';
+      serverLabel.innerHTML = `${autoPart}${pingPart}<span class="srv-name">${srv.name}</span>`;
     }
 
     /* Ping any host via mode:'no-cors' — returns round-trip ms or null.
@@ -1766,10 +1900,55 @@
       renderPickerList();
     }
 
+    /* Auto-select the nearest testable server.
+       Strategy: geo-IP for an instant guess, then let ping probes
+       confirm/refine after they finish. Only takes effect while autoMode=true. */
+    async function runAutoSelect() {
+      if (!autoMode) return;
+      /* Kick off geo + probes in parallel — geo usually wins in ~200ms. */
+      const geoPromise = fetchGeoIP();
+      const probePromise = probeAll();
+
+      /* Phase 1: as soon as we know location, pick the closest by distance. */
+      const geo = await geoPromise;
+      if (geo && autoMode) {
+        userGeo = geo;
+        const nearest = nearestByGeo(geo);
+        if (nearest) {
+          activeServer = nearest.srv;
+          saveActive();
+          renderServerLabel(activeServer);
+          if (serverPicker.classList.contains('open')) renderPickerList();
+        }
+      }
+
+      /* Phase 2: after probes finish, prefer lowest-ping testable server if it
+         beats the geo pick by a meaningful margin. Latency is ground truth. */
+      await probePromise;
+      if (!autoMode) return;
+      const testable = allServers
+        .filter(s => s.canTest && s.ping != null && s.ping < Infinity)
+        .sort((a, b) => a.ping - b.ping);
+      if (testable.length) {
+        const currentPing = activeServer.ping ?? Infinity;
+        /* Only switch if the best is >20% faster — avoids ping-flapping. */
+        if (testable[0].id !== activeServer.id && testable[0].ping < currentPing * 0.8) {
+          activeServer = testable[0];
+          saveActive();
+          renderServerLabel(activeServer);
+          if (serverPicker.classList.contains('open')) renderPickerList();
+        }
+      }
+    }
+
     async function initServers() {
       renderServerLabel(activeServer);
       btnChangeServer.disabled = false;
-      await probeAll();
+      if (autoMode) {
+        await runAutoSelect();
+      } else {
+        await probeAll();
+      }
     }
 
     /* ── Picker UI ──────────────────────────────────────────────────── */
@@ -1779,24 +1958,70 @@
         pickerStatus.textContent = 'Probing servers…';
         return;
       }
-      /* Sort: testable servers first (by ping), then ping-only (by ping) */
+      /* Sort: testable servers first (by geo distance if known, otherwise by
+         ping), then ping-only (by ping). Distance orders things sensibly even
+         before probes finish; ping refines it once we have measurements. */
       const sorted = [...allServers].sort((a, b) => {
         if (a.canTest !== b.canTest) return a.canTest ? -1 : 1;
-        return (a.ping ?? 9999) - (b.ping ?? 9999);
+        /* Prefer ping when both have it */
+        if (a.ping != null && b.ping != null) return a.ping - b.ping;
+        if (a.ping != null) return -1;
+        if (b.ping != null) return 1;
+        /* Both unknown pings — use distance if we have geo */
+        if (userGeo && a.lat != null && b.lat != null) {
+          return distanceKm(userGeo.lat, userGeo.lon, a.lat, a.lon)
+               - distanceKm(userGeo.lat, userGeo.lon, b.lat, b.lon);
+        }
+        return 0;
       });
-      pickerStatus.innerHTML = 'Click any "testing server" row to switch. Sharktech servers give real throughput from regional locations; Cloudflare uses anycast (auto-nearest). Other hosts show latency only for routing visibility.';
+
+      /* Location + auto-toggle header */
+      const locBits = [];
+      if (userGeo) {
+        const place = [userGeo.city, userGeo.region, userGeo.country].filter(Boolean).join(', ');
+        locBits.push(`Your location: <strong>${place || '(unknown)'}</strong>`);
+      }
+      pickerStatus.innerHTML = `
+        ${locBits.length ? `<div class="loc-line">${locBits.join('')}</div>` : ''}
+        <div class="picker-tools">
+          <button class="auto-chip ${autoMode ? 'on' : ''}" id="btnAutoMode">
+            ${autoMode ? '● AUTO ON' : '○ AUTO OFF'}
+          </button>
+          <span class="picker-hint">${autoMode ? 'Picking nearest server automatically' : 'Manual selection — click a row to switch'}</span>
+        </div>
+      `;
+      /* Wire the auto-toggle */
+      const autoBtn = document.getElementById('btnAutoMode');
+      if (autoBtn) autoBtn.addEventListener('click', async () => {
+        autoMode = !autoMode;
+        saveAuto();
+        if (autoMode) {
+          autoBtn.textContent = '● AUTO…';
+          await runAutoSelect();
+        }
+        renderServerLabel(activeServer);
+        renderPickerList();
+      });
+
       sorted.forEach(srv => {
         const item = document.createElement('div');
         const isActive = srv.id === activeServer.id;
         item.className = 'picker-item' + (isActive ? ' selected' : '');
         const pingTxt = (srv.ping != null && srv.ping < Infinity)
           ? Math.round(srv.ping) + 'ms' : '—';
+        let distTxt = '';
+        if (userGeo && Number.isFinite(srv.lat)) {
+          const km = distanceKm(userGeo.lat, userGeo.lon, srv.lat, srv.lon);
+          const mi = Math.round(km * 0.6214);
+          distTxt = `<span class="pi-dist">${mi.toLocaleString()} mi</span>`;
+        }
         const suffix = srv.canTest
           ? '<span class="pi-badge">testing server</span>'
           : '<span class="pi-badge pi-badge-info">ping only</span>';
         item.innerHTML = `
           <div class="pi-dot"></div>
           <span class="pi-name">${srv.name}</span>
+          ${distTxt}
           <span class="pi-ping">${pingTxt}</span>
           ${suffix}
         `;
@@ -1804,12 +2029,12 @@
         if (srv.canTest) {
           item.style.cursor = 'pointer';
           item.addEventListener('click', () => {
+            /* Manual selection turns off auto mode — respect the user's choice */
             activeServer = srv;
-            saveActive();
+            autoMode = false;
+            saveActive(); saveAuto();
             renderServerLabel(activeServer);
             renderPickerList();
-            /* Small confirmation nudge */
-            pickerStatus.innerHTML = `Switched to <strong>${srv.name}</strong>. Close and start the test.`;
           });
         }
         pickerList.appendChild(item);
